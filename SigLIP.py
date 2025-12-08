@@ -56,3 +56,41 @@ class SigLIPModel(torch.nn.Module):
             # ensure scalar is on CPU before converting to Python float
             output.append((text, probs[0][i].cpu().item()))
         return output  # return outputs and confidence for input
+
+    def encode_image(self, image) -> torch.Tensor:
+        inputs = self.processor(images=image, return_tensors="pt")
+        for k, v in list(inputs.items()):
+            if isinstance(v, torch.Tensor):
+                if v.is_floating_point() and self.use_cuda:
+                    inputs[k] = v.to(self.device, non_blocking=True).half()
+                else:
+                    inputs[k] = v.to(self.device, non_blocking=True)
+        with torch.inference_mode():
+            with torch.amp.autocast("cuda", enabled=self.use_cuda):
+                outputs = self.model.vision_model(**inputs)
+        embeds = outputs.pooler_output  # (1, hidden_dim)
+        embeds = F.normalize(embeds, dim=-1)
+        if embeds.shape[-1] >= 512:
+            embeds = embeds[..., :512]
+        else:
+            embeds = F.pad(embeds, (0, 512 - embeds.shape[-1]))
+        return embeds.squeeze(0).cpu().float()
+
+    def encode_text(self, text: str) -> torch.Tensor:
+        inputs = self.processor(text=[text], padding="max_length", return_tensors="pt")
+        for k, v in list(inputs.items()):
+            if isinstance(v, torch.Tensor):
+                if v.is_floating_point() and self.use_cuda:
+                    inputs[k] = v.to(self.device, non_blocking=True).half()
+                else:
+                    inputs[k] = v.to(self.device, non_blocking=True)
+        with torch.inference_mode():
+            with torch.amp.autocast("cuda", enabled=self.use_cuda):
+                outputs = self.model.text_model(**inputs)
+        embeds = outputs.pooler_output  # (1, hidden_dim)
+        embeds = F.normalize(embeds, dim=-1)
+        if embeds.shape[-1] >= 512:
+            embeds = embeds[..., :512]
+        else:
+            embeds = F.pad(embeds, (0, 512 - embeds.shape[-1]))
+        return embeds.squeeze(0).cpu().float()

@@ -1,5 +1,6 @@
 IMAGES/
 OUTPUT/
+lancedb_storage/
 .vscode/
 
 # Byte-compiled / optimized / DLL files
