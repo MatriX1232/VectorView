@@ -21,7 +21,8 @@ THREAD_COUNT = 6  # number of threads for CPU processing
 LANCEDB_DIR = "lancedb_storage"
 TABLE_NAME = "image_embeddings"
 SEARCH_TOP_K = 100
-EMBEDDING_DIM = 512  # Matches the truncated output from SigLIP.encode_image/encode_text
+EMBEDDING_DIM = 1152  # SigLIP2-large-patch16-512 has 1152-dim embeddings
+
 
 # Thread lock for safe DB writes
 db_lock = threading.Lock()
@@ -36,7 +37,8 @@ def init_vector_table():
     ])
     return db.open_table(TABLE_NAME) if TABLE_NAME in db.table_names() else db.create_table(TABLE_NAME, schema=schema)
 
-def process_image(image_file: str, siglip: SigLIPModel, user_search: str, table):
+
+def process_image(image_file: str, siglip: SigLIPModel, table):
         image_path = os.path.join(IMAGE_FOLDER, image_file)
         try:
             start_time = perf_counter()
@@ -51,27 +53,21 @@ def process_image(image_file: str, siglip: SigLIPModel, user_search: str, table)
             else:
                 image = image.resize((new_w, new_h))
 
-            output = siglip.forward(image=image, texts=[user_search])
-            # encode_image already returns a 1D CPU float tensor of size 512
+            # Only embed & index the image. Text-based searching is handled by `search_table`.
             embedding = siglip.encode_image(image).numpy().astype("float32").tolist()
             end_time = perf_counter()
-            LOGS.log_info(f"Processing time for image {image_file}: {end_time - start_time:.4f} seconds")
-            for _, confidence in output:
-                # Fix: thread-safe DB write
-                with db_lock:
-                    table.add([{
-                        "filename": image_file,
-                        "query": user_search,
-                        "confidence": float(confidence),
-                        "embedding": embedding,
-                    }])
-                LOGS.log_info(f"Image: {image_file}, Confidence for '{user_search}': {confidence:.2%}")
-                if confidence > 0.15:
-                    output_path = os.path.join(OUTPUT_FOLDER, image_file)
-                    image.save(output_path)
-                    LOGS.log_success(f"Image '{image_file}' saved to '{OUTPUT_FOLDER}' with confidence {confidence:.2%}")
+            LOGS.log_info(f"Indexing time for image {image_file}: {end_time - start_time:.4f} seconds")
+            # Thread-safe DB write
+            with db_lock:
+                table.add([{
+                    "filename": image_file,
+                    "query": "",
+                    "confidence": 0.0,
+                    "embedding": embedding,
+                }])
+            # LOGS.log_success(f"Indexed image '{image_file}' in vector DB.")
         except Exception as e:
-            LOGS.log_error(f"Failed to process image {image_file}: {e}")
+            LOGS.log_error(f"Failed to index image {image_file}: {e}")
 
 
 def search_table(table, siglip: SigLIPModel, user_search: str, top_k: int = SEARCH_TOP_K):
@@ -86,18 +82,27 @@ def search_table(table, siglip: SigLIPModel, user_search: str, top_k: int = SEAR
         for _, row in df.iterrows():
             if row['filename'] not in seen_files:
                 seen_files.add(row['filename'])
+                # if row['confidence'] > 0.85:  # confidence threshold
                 LOGS.log_info(f"Match: file={row['filename']}, distance={row['_distance']:.4f}")
-                Image.open(os.path.join(IMAGE_FOLDER, row['filename'])).save(os.path.join(OUTPUT_FOLDER, f"search_result_{row['filename']}"))
+                image = Image.open(os.path.join(IMAGE_FOLDER, row['filename']))
+                new_w = IMAGE_SCALE
+                new_h = image.height * IMAGE_SCALE // image.width
+                image.resize((new_w, new_h)).save(os.path.join(OUTPUT_FOLDER, f"search_result_{row['filename']}"))
+
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
-    try:
-        user_search = args[0]
-    except IndexError:
-        LOGS.log_error("No search term provided. Please provide a search term as a command-line argument.")
-        LOGS.log_info("Usage: python main.py <search_term> [--search-only]")
+    import argparse
+    parser = argparse.ArgumentParser(description="Index or search images using SigLIP2 embeddings")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--index-only", action="store_true", help="Index images into the vector DB")
+    group.add_argument("--search-only", action="store_true", help="Search existing index (requires a search term)")
+    parser.add_argument("search_term", nargs="?", help="Search term for --search-only")
+    parser.add_argument("--recreate-db", action="store_true", help="Delete and recreate the vector DB before indexing")
+    args = parser.parse_args()
+
+    if args.search_only and not args.search_term:
+        LOGS.log_error("Search term required for --search-only")
         sys.exit(1)
-    search_only = "--search-only" in args
 
     LOGS.log_info("Initializing SigLIP model...")
     try:
@@ -114,16 +119,28 @@ if __name__ == "__main__":
         LOGS.log_error(f"Failed to create output folder '{OUTPUT_FOLDER}': {e}")
         sys.exit(1)
 
+    if args.recreate_db and os.path.exists(LANCEDB_DIR):
+        import shutil
+        try:
+            shutil.rmtree(LANCEDB_DIR)
+            LOGS.log_info("Removed existing vector DB storage.")
+        except Exception as e:
+            LOGS.log_error(f"Failed to remove existing DB dir: {e}")
+
     table = init_vector_table()
 
-    if search_only:
+    if args.search_only:
         LOGS.log_info("Search-only mode: querying existing embeddings.")
-        search_table(table, SigLip, user_search)
+        search_table(table, SigLip, args.search_term)
         sys.exit(0)
 
-    LOGS.log_info(f"Processing images in folder: {IMAGE_FOLDER} for search term: '{user_search}'")
-    image_files = os.listdir(IMAGE_FOLDER)
-    with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
-        futures = [executor.submit(process_image, image_file, SigLip, user_search, table) for image_file in image_files]
-        for future in as_completed(futures):
-            future.result()
+    if args.index_only:
+        LOGS.log_info(f"Index-only mode: processing images in folder: {IMAGE_FOLDER}")
+        start_time = perf_counter()
+        image_files = os.listdir(IMAGE_FOLDER)
+        with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
+            futures = [executor.submit(process_image, image_file, SigLip, table) for image_file in image_files]
+            for future in as_completed(futures):
+                future.result()
+        end_time = perf_counter()
+        LOGS.log_success(f"Completed processing {len(image_files)} images in {end_time - start_time:.2f} seconds.")

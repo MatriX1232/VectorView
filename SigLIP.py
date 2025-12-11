@@ -6,8 +6,9 @@ import torch.nn.functional as F
 
 
 class SigLIPModel(torch.nn.Module):
-    def __init__(self, model_name="google/siglip-so400m-patch14-384", use_compile: bool = False):
+    def __init__(self, model_name="google/siglip2-large-patch16-512", use_compile: bool = False, embedding_dim: int = 1152):
         super().__init__()
+        self.embedding_dim = embedding_dim
         # choose device and enable CUDA optimizations if available
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.use_cuda = self.device.type == "cuda"
@@ -16,13 +17,17 @@ class SigLIPModel(torch.nn.Module):
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
 
-        # load model and move to device; use fp16 on GPU for better throughput
-        self.model = AutoModel.from_pretrained(model_name)
-        if self.use_cuda:
-            self.model.half().to(self.device, memory_format=torch.channels_last)
-        else:
+        # load model with fp16 and SDPA attention for better performance
+        self.model = AutoModel.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16 if self.use_cuda else torch.float32,
+            device_map="auto" if self.use_cuda else None,
+            attn_implementation="sdpa"
+        )
+        if not self.use_cuda:
             self.model.to(self.device)
         self.model.eval()
+        
         self.compiled = False
         if self.use_cuda and use_compile and hasattr(torch, "compile"):
             try:
@@ -34,7 +39,8 @@ class SigLIPModel(torch.nn.Module):
         self.processor = AutoProcessor.from_pretrained(model_name)
 
     def forward(self, image, texts: list):
-        inputs = self.processor(text=texts, images=image, padding="max_length", return_tensors="pt")
+        # SigLIP2 requires padding=max_length and max_length=64
+        inputs = self.processor(text=texts, images=image, padding="max_length", max_length=64, return_tensors="pt")
 
         # move tensors to device; cast floating tensors to half when using CUDA
         for k, v in list(inputs.items()):
@@ -70,14 +76,16 @@ class SigLIPModel(torch.nn.Module):
                 outputs = self.model.vision_model(**inputs)
         embeds = outputs.pooler_output  # (1, hidden_dim)
         embeds = F.normalize(embeds, dim=-1)
-        if embeds.shape[-1] >= 512:
-            embeds = embeds[..., :512]
+        # Truncate or pad to match embedding_dim
+        if embeds.shape[-1] >= self.embedding_dim:
+            embeds = embeds[..., :self.embedding_dim]
         else:
-            embeds = F.pad(embeds, (0, 512 - embeds.shape[-1]))
+            embeds = F.pad(embeds, (0, self.embedding_dim - embeds.shape[-1]))
         return embeds.squeeze(0).cpu().float()
 
     def encode_text(self, text: str) -> torch.Tensor:
-        inputs = self.processor(text=[text], padding="max_length", return_tensors="pt")
+        # SigLIP2 requires padding=max_length and max_length=64
+        inputs = self.processor(text=[text], padding="max_length", max_length=64, return_tensors="pt")
         for k, v in list(inputs.items()):
             if isinstance(v, torch.Tensor):
                 if v.is_floating_point() and self.use_cuda:
@@ -89,8 +97,9 @@ class SigLIPModel(torch.nn.Module):
                 outputs = self.model.text_model(**inputs)
         embeds = outputs.pooler_output  # (1, hidden_dim)
         embeds = F.normalize(embeds, dim=-1)
-        if embeds.shape[-1] >= 512:
-            embeds = embeds[..., :512]
+        # Truncate or pad to match embedding_dim
+        if embeds.shape[-1] >= self.embedding_dim:
+            embeds = embeds[..., :self.embedding_dim]
         else:
-            embeds = F.pad(embeds, (0, 512 - embeds.shape[-1]))
+            embeds = F.pad(embeds, (0, self.embedding_dim - embeds.shape[-1]))
         return embeds.squeeze(0).cpu().float()

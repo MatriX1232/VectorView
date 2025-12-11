@@ -8,6 +8,7 @@ This project implements an image processing pipeline that leverages the SigLIP (
 - **Similarity Search:** Stores image embeddings in a LanceDB database for efficient similarity search.
 - **Multi-threading:** Processes multiple images concurrently to improve performance.
 - **CUDA Optimizations:** The pipeline includes CUDA-optimized preprocessing and inference paths. On a CUDA-enabled GPU a single image typically takes about 0.2–0.3s to process (resize + encode), making the pipeline fast for large-scale, high-throughput workflows.
+- **General optimizations:** Efficient image loading, resizing, and batching to minimize latency and maximize throughput. For folder of 400 images, the entire processing and indexing takes about 25 seconds. (laptop with RTX 4070 GPU)
 - **Configurable:** Offers various configuration options, such as image scale, thread count, and database location.
 - **Logging:** Provides informative messages to the user through a custom logging system.
 - **Easy Integration:** Designed to be easily integrated into larger applications that require image and text understanding.
@@ -65,6 +66,8 @@ This project implements an image processing pipeline that leverages the SigLIP (
     -   `THREAD_COUNT`: The number of threads to use for parallel processing.
     -   `SEARCH_TOP_K`: The number of results to return for similarity searches.
     -   `EMBEDDING_DIM`: The dimensionality of the image embeddings.
+    -   `LANCEDB_DIR`: The directory where the LanceDB database will be stored.
+    -   `TABLE_NAME`: The name of the table in the LanceDB database to store image embeddings.
 
 2.  Run the application:
 
@@ -73,6 +76,21 @@ This project implements an image processing pipeline that leverages the SigLIP (
     ```
 
     This will process the images in the specified `IMAGE_FOLDER`, encode them using the SigLIP model, and store the resulting embeddings in the LanceDB database.
+
+### TUI (Interactive)
+
+An interactive text UI is available via `tui.py`. It uses `prompt_toolkit` and provides simple commands to index images and run text searches.
+
+Run:
+
+```bash
+python tui.py
+```
+
+Commands:
+- `index` — index all images in `IMAGE_FOLDER` (compute embeddings and store in LanceDB).
+- `search` — prompt for a text query and run the vector search (results are saved to `OUTPUT`).
+- `exit` — quit the TUI.
 
 
 ## 📝 License
