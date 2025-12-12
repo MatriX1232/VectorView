@@ -71,7 +71,8 @@ def process_image(image_file: str, siglip: SigLIPModel, table):
 
 
 def search_table(table, siglip: SigLIPModel, user_search: str, top_k: int = SEARCH_TOP_K):
-    # encode_text already returns a 1D CPU float tensor of size 512
+    """Search by cosine similarity; report ranking, not fake probabilities."""
+    # encode_text returns a normalized 1D CPU float tensor
     query_vec = siglip.encode_text(user_search).numpy().astype("float32")
     df = table.search(query_vec).metric("cosine").limit(top_k).to_pandas()
     if df.empty:
@@ -79,15 +80,22 @@ def search_table(table, siglip: SigLIPModel, user_search: str, top_k: int = SEAR
     else:
         # Group by filename to avoid showing duplicates, show best match per file
         seen_files = set()
+        rank = 1
         for _, row in df.iterrows():
-            if row['filename'] not in seen_files:
-                seen_files.add(row['filename'])
-                # if row['confidence'] > 0.85:  # confidence threshold
-                LOGS.log_info(f"Match: file={row['filename']}, distance={row['_distance']:.4f}")
-                image = Image.open(os.path.join(IMAGE_FOLDER, row['filename']))
-                new_w = IMAGE_SCALE
-                new_h = image.height * IMAGE_SCALE // image.width
-                image.resize((new_w, new_h)).save(os.path.join(OUTPUT_FOLDER, f"search_result_{row['filename']}"))
+            if row['filename'] in seen_files:
+                continue
+            seen_files.add(row['filename'])
+
+            # For cosine metric, similarity ~= 1 - distance
+            similarity = 1.0 - float(row['_distance'])
+            if similarity < 0.1:
+                break       # skip low-similarity results
+            LOGS.log_info(f"Rank {rank}: file={row['filename']}, cosine_sim={similarity:.4f}, distance={row['_distance']:.4f}")
+
+            rank += 1
+            image = Image.open(os.path.join(IMAGE_FOLDER, row['filename']))
+            new_w, new_h = IMAGE_SCALE, image.height * IMAGE_SCALE // image.width
+            image.resize((new_w, new_h)).save(os.path.join(OUTPUT_FOLDER, f"search_result_{row['filename']}"))
 
 
 if __name__ == "__main__":
