@@ -1,4 +1,7 @@
-# SigLIP Image Embedding Pipeline 🖼️ ➡️ 🚀
+> [!IMPORTANT]
+> Within few days the model will be swapped for DINOv3 (model accuracy reasons)
+
+# VectorView - SigLIP Image Embedding Pipeline 🖼️ ➡️ 🚀
 
 This project implements an image processing pipeline that leverages the SigLIP ( Sigmoid Loss for Language Image Pre-Training ;) ) model from Hugging Face Transformers to generate image embeddings. These embeddings are then stored in a LanceDB database, enabling efficient similarity search and other downstream tasks. The pipeline supports multi-threading for faster processing and GPU acceleration for image resizing and model inference. This project solves the problem of efficiently converting images into a vector representation suitable for semantic search and analysis.
 
